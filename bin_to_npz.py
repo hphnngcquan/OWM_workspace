@@ -15,6 +15,7 @@ def save_voxel_as_npz_pan(labels, save_path, voxel_size=VOXEL_SIZE):
     sem_labels = labels[xs, ys, zs].astype(np.uint8)
 
     ins_labels = labels[xs, ys, zs] >> 16
+    print(np.unique(ins_labels))
 
     x = xs.astype(np.float32) * voxel_size
     y = ys.astype(np.float32) * voxel_size
@@ -49,8 +50,8 @@ def save_voxel_as_npz_sem(labels, save_path, voxel_size=VOXEL_SIZE):
 
 if __name__ == "__main__":
     for i in range(1300):
-        print(f"./data/gen_pan/sample/{i}.label")
-        labels = np.fromfile(f"./data/gen_pan/sample/{i}.label", dtype=np.uint32).reshape(GRID_SHAPE)
-        SAVE_PATH = "./data/gen_pan/sample_npz"
+        print(f"./data/gen_pan_from_sem_DBSCAN/sample/{i}.label")
+        labels = np.fromfile(f"./data/gen_pan_from_sem_DBSCAN/sample/{i}.label", dtype=np.uint32).reshape(GRID_SHAPE)
+        SAVE_PATH = "./data/gen_pan_from_sem_DBSCAN/sample_npz"
         os.makedirs(SAVE_PATH, exist_ok=True)
         save_voxel_as_npz_pan(labels, os.path.join(SAVE_PATH, f"{i}.npz"))

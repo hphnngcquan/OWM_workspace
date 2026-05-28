@@ -7,7 +7,8 @@ import numpy as np
 from tqdm import tqdm
 from random import shuffle
 import json
-
+GRID_SHAPE = (256, 256, 32)
+VOXEL_SIZE = 0.2
 with open("./color_palette.json", 'r') as f:
     thing_color = json.load(f)
 
@@ -26,13 +27,26 @@ def visualize_pcd(pcd, window_name):
     vis.destroy_window()
 
 
-def load_pcd(pcd_file, xyz_range):
+def load_pcd(pcd_file, xyz_range, panoptic=False, voxel_size=VOXEL_SIZE):
     if pcd_file.endswith('.npz'):
         points = np.load(pcd_file)['arr_0']
     elif pcd_file.endswith('.npy'):
         points = np.load(pcd_file)
-    else:
-        raise ValueError(f"Unsupported file: {pcd_file}")
+    elif pcd_file.endswith('.label'):
+        labels = np.fromfile(pcd_file, dtype=np.uint32).reshape(GRID_SHAPE)
+        # Process the label data to extract points and labels
+
+        xs, ys, zs = np.where(labels > 0)
+        sem_labels = labels[xs, ys, zs].astype(np.uint8)
+        x = xs.astype(np.float32) * voxel_size
+        y = ys.astype(np.float32) * voxel_size
+        z = zs.astype(np.float32) * voxel_size
+        if panoptic:
+            ins_labels = labels[xs, ys, zs] >> 16
+            print(np.unique(ins_labels))
+            points = np.stack([x, y, z, sem_labels, ins_labels], axis=1)
+        else:
+            points = np.stack([x, y, z, sem_labels], axis=1)
 
     if xyz_range is None:
         return points
@@ -53,7 +67,7 @@ def npy_to_pcd(pcd_file, panoptic=False, outpainting=False):
     #     xyz_range = [[-51.2, 51.2], [-51.2, 51.2], [0, 6.4]]
     # else:
     #     xyz_range = [[-25.6, 25.6], [-25.6, 25.6], [-2.2, 4.2]]
-    pcd_ = load_pcd(pcd_file, xyz_range=None)
+    pcd_ = load_pcd(pcd_file, xyz_range=None, panoptic=panoptic)
 
     points = np.round(pcd_[:, :3] / 0.1) * 0.1
     sem_labels = pcd_[:, 3].astype(int)
@@ -86,7 +100,7 @@ def npy_to_pcd(pcd_file, panoptic=False, outpainting=False):
 @click.option('--outpainting', is_flag=True, help="Whether to visualize outpainting data (default: False)")
 def main(path, panoptic, outpainting):
     pcd_list = os.listdir(path)
-    shuffle(pcd_list)
+    # shuffle(pcd_list)
 
     for pcd_file in tqdm(pcd_list):
         print(f"\n{pcd_file}")
