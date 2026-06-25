@@ -33,8 +33,13 @@ def load_pcd(pcd_file, xyz_range, panoptic=False, voxel_size=VOXEL_SIZE):
     elif pcd_file.endswith('.npy'):
         points = np.load(pcd_file)
     elif pcd_file.endswith('.label'):
-        labels = np.fromfile(pcd_file, dtype=np.uint32).reshape(GRID_SHAPE)
-        # Process the label data to extract points and labels
+        try:
+            labels = np.fromfile(pcd_file, dtype=np.uint32).reshape(GRID_SHAPE)
+            print(np.unique(labels))
+        except:
+            labels = np.fromfile(pcd_file, dtype=np.uint16).reshape(GRID_SHAPE)
+            labels = np.vectorize(learning_map.get)(labels)
+            # Process the label data to extract points and labels
 
         xs, ys, zs = np.where(labels > 0)
         sem_labels = labels[xs, ys, zs].astype(np.uint8)
