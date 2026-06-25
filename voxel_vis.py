@@ -14,7 +14,7 @@ with open("./color_palette.json", 'r') as f:
     thing_color = json.load(f)
 
 
-def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
+def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False ):
     raw = np.fromfile(pcd_file, dtype=np.uint16)
     if raw.size == np.prod(GRID_SHAPE):
         labels = raw.reshape(GRID_SHAPE).astype(np.uint32)
@@ -33,6 +33,13 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
     sem_labels = np.clip(sem_labels, 0, len(color_array) - 1)
     rgb = color_array[sem_labels][:, ::-1] / 255.0  # BGR->RGB
 
+    if thing_only:
+        # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
+        thing_mask = (sem_labels > 0) & (sem_labels <= 9)
+        rgb[thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    else:
+        thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
+
     if panoptic:
         ins = (labels[xs, ys, zs] >> 16).astype(np.int64)
         for label in np.unique(ins):
@@ -42,9 +49,9 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
             c = thing_color.get(str(int(label) + np.random.randint(0, 15)))
             if c is not None:
                 rgb[mask] = c
-    return centers, rgb
+    return centers, rgb, thing_mask
 
-def load_gt(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
+def load_gt(pcd_file, panoptic=False, thing_only=False, voxel_size=VOXEL_SIZE):
     with open(pcd_file, 'rb') as f:
         raw = pickle.load(f)
     sem = raw['semantic_labels'].astype(np.uint8)
@@ -62,6 +69,13 @@ def load_gt(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
     sem_labels = np.clip(sem_labels, 0, len(color_array) - 1)
     rgb = color_array[sem_labels][:, ::-1] / 255.0  # BGR->RGB
 
+    if thing_only:
+        # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
+        thing_mask = (sem_labels < 9)
+        rgb[~thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    else:
+        thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
+
     if panoptic:
         ins = (raw['instance_labels'][xs, ys, zs]).astype(np.uint8)
         for label in np.unique(ins):
@@ -71,7 +85,7 @@ def load_gt(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE):
             c = thing_color.get(str(int(label) ))
             if c is not None:
                 rgb[mask] = c
-    return centers, rgb
+    return centers, rgb, thing_mask
 
 
 def build_glyph_cubes(centers, rgb, voxel_size=VOXEL_SIZE, gap=0.08):
@@ -106,6 +120,7 @@ def save_figure(pl, out_stem, fmt, scale=3, transparent=False):
 @click.command()
 @click.option('--path', '-p', type=str, default="data/sample_npz")
 @click.option('--panoptic', is_flag=True)
+@click.option('--thing_only', is_flag=True, help="Show only thing classes ")
 @click.option('--out-dir', type=str, default="renders")
 @click.option('--fmt', type=click.Choice(['png', 'jpg', 'svg', 'pdf']),
               default='png', help="Default save format for the S key.")
@@ -114,7 +129,8 @@ def save_figure(pl, out_stem, fmt, scale=3, transparent=False):
                    "e.g. \"[(x,y,z),(fx,fy,fz),(ux,uy,uz)]\"")
 @click.option('--gt', is_flag=True, help="Load ground truth voxel data instead of label files.")
 @click.option('--gt_scene', type=str, default=None, help="Path to the ground truth scene file (pkl) if --gt is used.")
-def main(path, panoptic, out_dir, fmt, cam, gt, gt_scene):
+
+def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, gt_scene):
     os.makedirs(out_dir, exist_ok=True)
     if not gt:
         files = sorted([f for f in os.listdir(path) if f.endswith('.label')])
@@ -128,7 +144,7 @@ def main(path, panoptic, out_dir, fmt, cam, gt, gt_scene):
           "S = save   1/2/3 = png/jpg/svg   Q = quit")
 
     # mutable state shared with key callbacks
-    state = {"idx": 0, "fmt": fmt, "quit": False, "reload": True, "transparent": False}
+    state = {"idx": 0, "fmt": fmt, "quit": False, "reload": True, "transparent": False, "stuff_opacity": 0.0}
 
     pl = pv.Plotter(window_size=[1600, 1000])
     pl.background_color = 'white'
@@ -147,13 +163,24 @@ def main(path, panoptic, out_dir, fmt, cam, gt, gt_scene):
         stem = files[state["idx"]]
         full_path = os.path.join(path, stem)
         if not gt:
-            centers, rgb = load_voxels(full_path, panoptic=panoptic)
+            centers, rgb, is_thing = load_voxels(full_path, panoptic=panoptic, thing_only=thing_only)
         else:
-            centers, rgb = load_gt(full_path, panoptic=panoptic)
+            centers, rgb, is_thing = load_gt(full_path, panoptic=panoptic, thing_only=thing_only)
         print(f"\n[{state['idx']+1}/{len(files)}] {stem}: {len(centers)} voxels")
-        glyphs = build_glyph_cubes(centers, rgb)
-        pl.add_mesh(glyphs, scalars='rgb', rgb=True,
-                    show_scalar_bar=False, smooth_shading=True)
+        common = dict(scalars='rgb', rgb=True, show_scalar_bar=False,
+                      smooth_shading=True, ambient=0.7, diffuse=0.5, specular=0.2)
+
+        # things: fully opaque
+        if is_thing.any():
+            g_thing = build_glyph_cubes(centers[is_thing], rgb[is_thing])
+            pl.add_mesh(g_thing, opacity=1.0, **common)
+
+        # non-things: low opacity
+        non = ~is_thing
+        if non.any():
+            g_stuff = build_glyph_cubes(centers[non], rgb[non])
+            pl.add_mesh(g_stuff, opacity=state["stuff_opacity"], **common)
+
         pl.enable_eye_dome_lighting()
         pl.add_text(stem, font_size=10, name="title")
         if init_cam is not None:
@@ -177,6 +204,8 @@ def main(path, panoptic, out_dir, fmt, cam, gt, gt_scene):
         print("camera_position =", pl.camera_position)
 
     def do_save():
+        # pl remove text
+        pl.remove_actor("title")
         stem = os.path.splitext(files[state["idx"]])[0]
         time_str = time.strftime("%Y-%m-%d_%H-%M-%S")
         save_figure(pl, os.path.join(out_dir, f"{stem}_{time_str}"), state["fmt"], transparent=state["transparent"])
