@@ -13,6 +13,49 @@ VOXEL_SIZE = 0.2
 with open("./color_palette.json", 'r') as f:
     thing_color = json.load(f)
 
+def load_pasco_pred(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False):
+    with open(pcd_file, 'rb') as f:
+        compressed = pickle.load(f)
+    voxel_label = compressed['ssc_pred'].astype(np.uint8).squeeze(0)
+    pred_panoptic_seg = compressed["pred_panoptic_seg"].squeeze()
+    pred_segments_info = compressed["pred_segments_info"][0]
+    instance_labels = np.zeros_like(pred_panoptic_seg, dtype=np.uint32)
+    instance_id = 1
+    for seg in pred_segments_info:
+        segment_mask = (pred_panoptic_seg == seg["id"])
+        if seg["isthing"]:
+            instance_labels[segment_mask] = instance_id
+            instance_id += 1
+        else:
+            instance_labels[segment_mask] = 0
+    
+    voxel_ins_label = instance_labels.astype(np.uint8)
+    sem = voxel_label
+    xs, ys, zs = np.where(sem > 0)
+    sem_labels = sem[xs, ys, zs].astype(int)
+    centers = np.stack([xs, ys, zs], axis=1).astype(np.float32) * voxel_size
+
+    color_array = np.array(list(color_map.values()))
+    sem_labels = np.clip(sem_labels, 0, len(color_array) - 1)
+    rgb = color_array[sem_labels][:, ::-1] / 255.0  # BGR->RGB
+
+    if thing_only:
+        # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
+        thing_mask = (sem_labels > 0) & (sem_labels <= 8)
+        rgb[~thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    else:
+        thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
+    
+    if panoptic:
+        ins = voxel_ins_label[xs, ys, zs].astype(np.int64)
+        for label in np.unique(ins):
+            if label == 0:
+                continue
+            mask = ins == label
+            c = thing_color.get(str(int(label)))
+            if c is not None:
+                rgb[mask] = c
+    return centers, rgb, thing_mask
 
 def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False ):
     raw = np.fromfile(pcd_file, dtype=np.uint16)
@@ -25,6 +68,8 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=Fals
     if sem.max() > 19:
         sem = np.vectorize(lambda k: learning_map.get(k, 0))(sem)
 
+    # create a noisy sem
+    # sem = np.random.randint(0, 20, size=sem.shape, dtype=np.uint8)
     xs, ys, zs = np.where(sem > 0)
     sem_labels = sem[xs, ys, zs].astype(int)
     centers = np.stack([xs, ys, zs], axis=1).astype(np.float32) * voxel_size
@@ -35,7 +80,7 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=Fals
 
     if thing_only:
         # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
-        thing_mask = (sem_labels > 0) & (sem_labels <= 9)
+        thing_mask = (sem_labels > 0) & (sem_labels <= 8)
         rgb[thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
     else:
         thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
@@ -46,7 +91,7 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=Fals
             if label == 0:
                 continue
             mask = ins == label
-            c = thing_color.get(str(int(label) + np.random.randint(0, 15)))
+            c = thing_color.get(str(int(label)))
             if c is not None:
                 rgb[mask] = c
     return centers, rgb, thing_mask
@@ -128,17 +173,27 @@ def save_figure(pl, out_stem, fmt, scale=3, transparent=False):
               help="Initial camera pose as a Python tuple string, "
                    "e.g. \"[(x,y,z),(fx,fy,fz),(ux,uy,uz)]\"")
 @click.option('--gt', is_flag=True, help="Load ground truth voxel data instead of label files.")
-@click.option('--gt_scene', type=str, default=None, help="Path to the ground truth scene file (pkl) if --gt is used.")
+@click.option('--scene', type=str, default=None, help="Path to the ground truth scene file (pkl) if --gt is used.")
+@click.option('--pasco_pred', is_flag=True, help="Load predicted voxel data from PASCo instead of label files.")
 
-def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, gt_scene):
+def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, scene, pasco_pred):
     os.makedirs(out_dir, exist_ok=True)
     if not gt:
-        files = sorted([f for f in os.listdir(path) if f.endswith('.label')])
+        if not pasco_pred:
+            if scene is not None:
+                files = [f"{scene}.label"]
+            else:
+                files = sorted([f for f in os.listdir(path) if f.endswith('.label')])
+        else:
+            if scene is not None:
+                files = [f"{scene}.pkl"]
+            else:
+                files = sorted([f for f in os.listdir(path) if f.endswith('.pkl')])
     else:
-        if gt_scene is None:
+        if scene is None:
             files = sorted([f for f in os.listdir(path) if f.endswith('.pkl')])
         else:
-            files = [f"{gt_scene}.pkl"]
+            files = [f"{scene}.pkl"]
     print(f"Found {len(files)} label files.")
     print("Keys:  N/B = next/prev   C = print camera   "
           "S = save   1/2/3 = png/jpg/svg   Q = quit")
@@ -163,7 +218,10 @@ def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, gt_scene):
         stem = files[state["idx"]]
         full_path = os.path.join(path, stem)
         if not gt:
-            centers, rgb, is_thing = load_voxels(full_path, panoptic=panoptic, thing_only=thing_only)
+            if not pasco_pred:
+                centers, rgb, is_thing = load_voxels(full_path, panoptic=panoptic, thing_only=thing_only)
+            else:
+                centers, rgb, is_thing = load_pasco_pred(full_path, panoptic=panoptic, thing_only=thing_only)
         else:
             centers, rgb, is_thing = load_gt(full_path, panoptic=panoptic, thing_only=thing_only)
         print(f"\n[{state['idx']+1}/{len(files)}] {stem}: {len(centers)} voxels")
