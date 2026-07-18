@@ -7,13 +7,14 @@ import pickle
 from utils.data_map import color_map, learning_map
 import time
 
+# GRID_SHAPE = (512, 512, 32)
 GRID_SHAPE = (256, 256, 32)
 VOXEL_SIZE = 0.2
 
 with open("./color_palette.json", 'r') as f:
     thing_color = json.load(f)
 
-def load_pasco_pred(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False):
+def load_pasco_pred(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False, stuff_only=False):
     with open(pcd_file, 'rb') as f:
         compressed = pickle.load(f)
     voxel_label = compressed['ssc_pred'].astype(np.uint8).squeeze(0)
@@ -43,6 +44,11 @@ def load_pasco_pred(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=
         # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
         thing_mask = (sem_labels > 0) & (sem_labels <= 8)
         rgb[~thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    elif stuff_only:
+        # Filter out thing classes (assuming stuff classes have labels > 19)
+        stuff_mask = (sem_labels > 8)
+        rgb[~stuff_mask] = [1.0, 1.0, 1.0]  # Set stuff classes to white
+        thing_mask = stuff_mask
     else:
         thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
     
@@ -57,7 +63,7 @@ def load_pasco_pred(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=
                 rgb[mask] = c
     return centers, rgb, thing_mask
 
-def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False ):
+def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=False, stuff_only=False):
     raw = np.fromfile(pcd_file, dtype=np.uint16)
     if raw.size == np.prod(GRID_SHAPE):
         labels = raw.reshape(GRID_SHAPE).astype(np.uint32)
@@ -82,6 +88,11 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=Fals
         # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
         thing_mask = (sem_labels > 0) & (sem_labels <= 8)
         rgb[thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    elif stuff_only:
+        # Filter out thing classes (assuming stuff classes have labels > 19)
+        stuff_mask = (sem_labels > 8)
+        rgb[~stuff_mask] = [1.0, 1.0, 1.0]  # Set stuff classes to white
+        thing_mask = stuff_mask
     else:
         thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
 
@@ -96,7 +107,7 @@ def load_voxels(pcd_file, panoptic=False, voxel_size=VOXEL_SIZE, thing_only=Fals
                 rgb[mask] = c
     return centers, rgb, thing_mask
 
-def load_gt(pcd_file, panoptic=False, thing_only=False, voxel_size=VOXEL_SIZE):
+def load_gt(pcd_file, panoptic=False, thing_only=False, stuff_only=False, voxel_size=VOXEL_SIZE):
     with open(pcd_file, 'rb') as f:
         raw = pickle.load(f)
     sem = raw['semantic_labels'].astype(np.uint8)
@@ -118,6 +129,11 @@ def load_gt(pcd_file, panoptic=False, thing_only=False, voxel_size=VOXEL_SIZE):
         # Filter out stuff classes (assuming thing classes have labels > 0 and <= 19)
         thing_mask = (sem_labels < 9)
         rgb[~thing_mask] = [1.0, 1.0, 1.0]  # Set thing classes to white
+    elif stuff_only:
+        # Filter out thing classes (assuming stuff classes have labels > 19)
+        stuff_mask = (sem_labels > 8)
+        rgb[~stuff_mask] = [1.0, 1.0, 1.0]  # Set stuff classes to white
+        thing_mask = stuff_mask
     else:
         thing_mask = np.ones(len(sem_labels), dtype=bool)  # All voxels are considered "things" if not filtering
 
@@ -166,6 +182,7 @@ def save_figure(pl, out_stem, fmt, scale=3, transparent=False):
 @click.option('--path', '-p', type=str, default="data/sample_npz")
 @click.option('--panoptic', is_flag=True)
 @click.option('--thing_only', is_flag=True, help="Show only thing classes ")
+@click.option('--stuff_only', is_flag=True, help="Show only stuff classes ")
 @click.option('--out-dir', type=str, default="renders")
 @click.option('--fmt', type=click.Choice(['png', 'jpg', 'svg', 'pdf']),
               default='png', help="Default save format for the S key.")
@@ -176,7 +193,7 @@ def save_figure(pl, out_stem, fmt, scale=3, transparent=False):
 @click.option('--scene', type=str, default=None, help="Path to the ground truth scene file (pkl) if --gt is used.")
 @click.option('--pasco_pred', is_flag=True, help="Load predicted voxel data from PASCo instead of label files.")
 
-def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, scene, pasco_pred):
+def main(path, panoptic, thing_only, stuff_only, out_dir, fmt, cam, gt, scene, pasco_pred):
     os.makedirs(out_dir, exist_ok=True)
     if not gt:
         if not pasco_pred:
@@ -211,6 +228,15 @@ def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, scene, pasco_pred):
             init_cam = eval(cam)
         except Exception as e:
             print(f"[!] Could not parse --cam: {e}")
+    pl.add_text("", position="lower_right", font_size=12, name="quad")
+
+    def on_mouse_move(*args):
+        x, y = pl.iren.interactor.GetEventPosition()
+        w, h = pl.window_size
+        horiz = "L" if x < w / 2 else "R"
+        vert = "T" if y > h / 2 else "D"   # VTK origin is bottom-left
+        pl.add_text(f"{vert}{horiz}  ({x}, {y})", position="lower_right",
+                    font_size=12, name="quad")
 
     def load_current(gt=False):
         """Clear and load the file at state['idx'] into the open window."""
@@ -219,11 +245,11 @@ def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, scene, pasco_pred):
         full_path = os.path.join(path, stem)
         if not gt:
             if not pasco_pred:
-                centers, rgb, is_thing = load_voxels(full_path, panoptic=panoptic, thing_only=thing_only)
+                centers, rgb, is_thing = load_voxels(full_path, panoptic=panoptic, thing_only=thing_only, stuff_only=stuff_only)
             else:
-                centers, rgb, is_thing = load_pasco_pred(full_path, panoptic=panoptic, thing_only=thing_only)
+                centers, rgb, is_thing = load_pasco_pred(full_path, panoptic=panoptic, thing_only=thing_only, stuff_only=stuff_only)
         else:
-            centers, rgb, is_thing = load_gt(full_path, panoptic=panoptic, thing_only=thing_only)
+            centers, rgb, is_thing = load_gt(full_path, panoptic=panoptic, thing_only=thing_only, stuff_only=stuff_only)
         print(f"\n[{state['idx']+1}/{len(files)}] {stem}: {len(centers)} voxels")
         common = dict(scalars='rgb', rgb=True, show_scalar_bar=False,
                       smooth_shading=True, ambient=0.7, diffuse=0.5, specular=0.2)
@@ -293,6 +319,7 @@ def main(path, panoptic, thing_only, out_dir, fmt, cam, gt, scene, pasco_pred):
     pl.add_key_event('2', set_fmt_jpg)
     pl.add_key_event('3', set_fmt_svg)
     pl.add_key_event('q', do_quit)
+    pl.iren.add_observer("MouseMoveEvent", on_mouse_move)
 
     load_current(gt=gt)
     pl.show()  # blocks until window closed / Q pressed
