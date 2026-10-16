@@ -290,6 +290,7 @@ def main(path, panoptic, thing_only, stuff_only, out_dir, fmt, cam, gt, scene, p
     def do_save():
         # pl remove text
         pl.remove_actor("title")
+        pl.remove_actor("quad")
         stem = os.path.splitext(files[state["idx"]])[0]
         time_str = time.strftime("%Y-%m-%d_%H-%M-%S")
         save_figure(pl, os.path.join(out_dir, f"{stem}_{time_str}"), state["fmt"], transparent=state["transparent"])
